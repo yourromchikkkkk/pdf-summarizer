@@ -89,9 +89,16 @@ async def summarize_chunk(chunk: str, chunk_index: int, total_chunks: int) -> st
     logger.info(f"Summarizing chunk {chunk_index + 1}/{total_chunks} (length={len(chunk)})...")
     
     prompt = (
-        "Extract a comprehensive, bulleted summary of key metrics, arguments, data points, "
-        "and structured information from the following section of a document. Maintain technical clarity: "
-        f"{chunk}"
+        "<task>\n"
+        "Analyze the document section and produce a structured, bulleted summary covering:\n"
+        "- Key arguments and conclusions\n"
+        "- Quantitative data, metrics, and statistics (preserve exact numbers)\n"
+        "- Important findings, definitions, or structured information\n"
+        "Be concise but complete. Do not add interpretation beyond what is stated.\n"
+        "</task>\n\n"
+        "<document_section>\n"
+        f"{chunk}\n"
+        "</document_section>"
     )
 
     # Call OpenAI Async API
@@ -115,14 +122,24 @@ async def reduce_summaries(summaries: List[str]) -> str:
     Reduce Phase: Consolidate multiple chunk summaries into a final executive summary.
     """
     logger.info(f"Starting Reduce phase for {len(summaries)} summaries...")
-    combined_summaries = "\n\n--- SECTION SUMMARY ---\n\n".join(summaries)
-    
+    combined_summaries = "\n\n".join(
+        f"<section index=\"{i + 1}\">\n{s}\n</section>" for i, s in enumerate(summaries)
+    )
+
     prompt = (
-        "You are an expert analyst. Synthesize the following partial section summaries "
-        "into a single, highly structured, executive-level final summary. Use professional "
-        "Markdown headers (e.g., ## Executive Summary, ## Key Findings, ## Data & Analytics tables "
-        "if applicable). Ensure there is zero redundancy: "
-        f"{combined_summaries}"
+        "<task>\n"
+        "Synthesize the section summaries into a single, executive-level final summary.\n"
+        "<requirements>\n"
+        "- Use Markdown headers: ## Executive Summary, ## Key Findings, ## Conclusions\n"
+        "- Add a ## Data & Metrics table if quantitative data is present\n"
+        "- Each insight must appear exactly once — eliminate all redundancy\n"
+        "- Preserve specific numbers, statistics, and technical terminology\n"
+        "- Keep the tone professional and objective\n"
+        "</requirements>\n"
+        "</task>\n\n"
+        "<section_summaries>\n"
+        f"{combined_summaries}\n"
+        "</section_summaries>"
     )
 
     client = get_openai_client()
