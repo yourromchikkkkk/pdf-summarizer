@@ -1,5 +1,7 @@
 import os
 import uuid
+import json
+import asyncio
 import logging
 import tempfile
 from typing import Optional
@@ -9,11 +11,12 @@ load_dotenv(find_dotenv())  # walks up from cwd to find root .env
 
 from fastapi import FastAPI, UploadFile, File, Header, Query, Depends, HTTPException, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from .database import get_db, engine, Base
 from .models import Document
-from .pipeline import run_pipeline
+from .pipeline import run_pipeline, register_progress_queue, unregister_progress_queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
@@ -108,6 +111,38 @@ def get_document(doc_id: str, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     return {"id": doc.id, "user_id": doc.user_id, "filename": doc.filename, "status": doc.status, "summary": doc.summary, "created_at": doc.created_at}
+
+
+@app.get("/api/documents/{doc_id}/events")
+async def document_events(doc_id: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+    if doc.status in ("completed", "failed"):
+        async def terminal_stream():
+            yield f"data: {json.dumps({'stage': doc.status})}\n\n"
+        return StreamingResponse(terminal_stream(), media_type="text/event-stream", headers=sse_headers)
+
+    async def event_stream():
+        q = register_progress_queue(doc_id)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                    if event.get("stage") in ("completed", "failed"):
+                        break
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            unregister_progress_queue(doc_id)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=sse_headers)
 
 
 @app.get("/health")

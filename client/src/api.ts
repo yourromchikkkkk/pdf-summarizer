@@ -10,6 +10,10 @@ export async function fetchHistory(userId: string): Promise<DocumentRecord[]> {
   return res.json();
 }
 
+export function openProgressStream(docId: string): EventSource {
+  return new EventSource(`${API_BASE}/api/documents/${docId}/events`);
+}
+
 export async function uploadDocument(file: File, userId: string): Promise<DocumentRecord> {
   const formData = new FormData();
   formData.append('file', file);

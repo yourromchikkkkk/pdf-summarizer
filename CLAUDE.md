@@ -73,6 +73,5 @@ client/src/
 | `LLM_MODEL` | server | `openai/gpt-4o-mini` | Model used for Map and Reduce phases |
 | `DATABASE_URL` | server | `sqlite:///./pdf_summarizer.db` | SQLite path |
 | `VITE_API_URL` | client build | `http://localhost:8000` | Backend origin |
-| `VITE_POLL_INTERVAL_MS` | client build | `4000` | History polling interval (ms) |
 
 Vite reads `.env` from the **monorepo root** (configured via `envDir: '..'` in `vite.config.ts`).

@@ -27,6 +27,23 @@ def get_openai_client() -> AsyncOpenAI:
         )
     return openai_client
 
+
+_progress_queues: dict = {}
+
+def register_progress_queue(document_id: str) -> asyncio.Queue:
+    q: asyncio.Queue = asyncio.Queue()
+    _progress_queues[document_id] = q
+    return q
+
+def unregister_progress_queue(document_id: str) -> None:
+    _progress_queues.pop(document_id, None)
+
+async def emit_progress(document_id: str, data: dict) -> None:
+    q = _progress_queues.get(document_id)
+    if q:
+        await q.put(data)
+
+
 def chunk_markdown(text: str, max_chunk_size: int = 10000) -> List[str]:
     """
     Split markdown text into chunks of roughly max_chunk_size characters.
@@ -168,6 +185,7 @@ async def run_pipeline(document_id: str, file_path: str):
     db = SessionLocal()
     try:
         # 1. Parse PDF using Docling
+        await emit_progress(document_id, {"stage": "parsing"})
         logger.info(f"Parsing PDF with Docling: {file_path}")
         pipeline_options = PdfPipelineOptions()
         # Force CPU to avoid MPS float64 errors on Apple Silicon.
@@ -189,6 +207,7 @@ async def run_pipeline(document_id: str, file_path: str):
         # 2. Chunking
         chunks = chunk_markdown(markdown_text, max_chunk_size=10000)
         total_chunks = len(chunks)
+        await emit_progress(document_id, {"stage": "chunking", "total_chunks": total_chunks})
         logger.info(f"Split markdown into {total_chunks} chunks.")
 
         # 3. Map Phase: Summarize each chunk
@@ -197,12 +216,15 @@ async def run_pipeline(document_id: str, file_path: str):
 
         async def sem_summarize(chunk: str, idx: int) -> str:
             async with semaphore:
-                return await summarize_chunk(chunk, idx, total_chunks)
+                result = await summarize_chunk(chunk, idx, total_chunks)
+            await emit_progress(document_id, {"stage": "summarizing", "chunk": idx + 1, "total_chunks": total_chunks})
+            return result
 
         tasks = [sem_summarize(chunk, i) for i, chunk in enumerate(chunks)]
         chunk_summaries = await asyncio.gather(*tasks)
 
         # 4. Reduce Phase: Consolidate summaries
+        await emit_progress(document_id, {"stage": "reducing"})
         final_summary = await reduce_summaries(chunk_summaries)
 
         # 5. State Machine Update: Success
@@ -211,6 +233,7 @@ async def run_pipeline(document_id: str, file_path: str):
             doc.status = "completed"
             doc.summary = final_summary
             db.commit()
+            await emit_progress(document_id, {"stage": "completed"})
             logger.info(f"Updated document_id={document_id} status to COMPLETED.")
         else:
             logger.error(f"Document {document_id} not found in database on success update.")
@@ -224,6 +247,7 @@ async def run_pipeline(document_id: str, file_path: str):
             doc.status = "failed"
             doc.summary = f"Error during parsing or summarization: {str(e)}"
             db.commit()
+            await emit_progress(document_id, {"stage": "failed", "error": str(e)})
             logger.info(f"Updated document_id={document_id} status to FAILED.")
         else:
             logger.error(f"Document {document_id} not found in database on failure update.")
