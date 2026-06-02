@@ -21,6 +21,13 @@ npm run build        # tsc + vite build → dist/
 npm run lint         # ESLint
 ```
 
+### Docker (full stack)
+```bash
+# Requires root .env with OPENROUTER_API_KEY=...
+docker-compose up --build
+# client → http://localhost:5173  |  API docs → http://localhost:8000/docs
+```
+
 ## Architecture
 
 **Stack**: React + Vite + TanStack Query (client) / FastAPI + SQLite (server) — orchestrated via Docker Compose.

@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: pdf_summarizer_server
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - LLM_MODEL=${LLM_MODEL:-openai/gpt-4o-mini}
+      - DATABASE_URL=sqlite:////data/pdf_summarizer.db
+    volumes:
+      - db_data:/data
+    restart: always
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: pdf_summarizer_client
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
+    restart: always
+
+volumes:
+  db_data:
+    driver: local

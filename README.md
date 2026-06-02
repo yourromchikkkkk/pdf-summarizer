@@ -10,6 +10,8 @@ A production-grade monorepo web application that allows users to upload large PD
 │   │   ├── App.tsx         # Main UI (Dropzone, history polling, Reading panel)
 │   │   ├── index.css       # Tailwind imports & custom Markdown CSS styles
 │   │   └── main.tsx        # React entrypoint
+│   ├── Dockerfile          # Multi-stage production build (Node -> Nginx)
+│   ├── nginx.conf          # Nginx routing configuration (with SPA fallback)
 │   ├── vite.config.ts      # Vite configuration with Tailwind CSS v4 support
 │   └── package.json        # Frontend dependencies
 │
@@ -19,10 +21,12 @@ A production-grade monorepo web application that allows users to upload large PD
 │   │   ├── database.py     # SQLite engine and SQLAlchemy session setup
 │   │   ├── models.py       # DB schema for 'documents' table
 │   │   └── pipeline.py     # Docling PDF parser + OpenAI Map-Reduce execution logic
+│   ├── Dockerfile          # Server Dockerfile (CPU PyTorch + Pre-cached models)
 │   └── requirements.txt    # Python dependencies
 │
 ├── scripts/
 │   └── summarize.py        # Standalone CLI — runs the pipeline without the web server
+├── docker-compose.yml      # Orchestrates client and server containers
 └── README.md               # Setup and execution guide (this file)
 ```
 
@@ -39,6 +43,33 @@ A production-grade monorepo web application that allows users to upload large PD
 5. **Docker Optimization**:
    - Uses CPU-only PyTorch, reducing image size by ~2GB.
    - Pre-downloads Docling AI model weights at Docker image build-time to ensure runs are fast and do not require external Hugging Face downloads at runtime.
+
+---
+
+## Quick Start (Docker Compose)
+
+### 1. Environment Configuration
+
+Copy `.env.example` to `.env` in the **root directory** and fill in your key:
+
+```env
+OPENROUTER_API_KEY=your-openrouter-api-key-here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1   # optional override
+LLM_MODEL=openai/gpt-4o-mini                       # any OpenRouter model slug
+VITE_POLL_INTERVAL_MS=4000
+```
+
+### 2. Start the Application
+
+Build and start both the client and server containers:
+
+```bash
+docker-compose up --build
+```
+
+- **Client SPA**: Access at [http://localhost:5173](http://localhost:5173)
+- **FastAPI Documentation**: Access at [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Persistent Data**: SQLite database is persisted in the `db_data` Docker volume. Uploaded PDFs are written to OS temp files and deleted immediately after processing.
 
 ---
 
