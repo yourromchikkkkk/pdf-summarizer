@@ -12,6 +12,15 @@ uv pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
+### Frontend (client/)
+```bash
+cd client
+npm install
+npm run dev          # Vite dev server on :5173
+npm run build        # tsc + vite build → dist/
+npm run lint         # ESLint
+```
+
 ## Architecture
 
 **Stack**: React + Vite + TanStack Query (client) / FastAPI + SQLite (server) — orchestrated via Docker Compose.
@@ -32,6 +41,22 @@ Single `documents` table: `id` (UUID PK), `user_id` (indexed), `filename`, `stat
 
 ### Database
 SQLite by default. Override with `DATABASE_URL` env var. In Docker, DB lives in the `db_data` named volume at `sqlite:////data/pdf_summarizer.db`.
+
+### Frontend structure
+```
+client/src/
+  api.ts              # fetchHistory, uploadDocument
+  types.ts            # DocumentRecord interface
+  App.tsx             # orchestration only — state, React Query, event wiring
+  components/
+    Header.tsx
+    ProcessingBanner.tsx
+    UploadCard.tsx     # owns drag state and file validation
+    HistoryPanel.tsx
+    SummaryPanel.tsx   # owns copy/download state
+```
+
+`App.tsx` wires `useQuery` (polls only when processing) and `useMutation` (upload → `invalidateQueries`). Components own only their local UI state.
 
 ### Key Env Vars
 | Variable | Where | Default | Purpose |
