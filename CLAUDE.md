@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Commands
+
+### Backend (server/)
+```bash
+cd server
+uv venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
 ## Architecture
 
 **Stack**: React + Vite + TanStack Query (client) / FastAPI + SQLite (server) — orchestrated via Docker Compose.
@@ -24,8 +34,13 @@ Single `documents` table: `id` (UUID PK), `user_id` (indexed), `filename`, `stat
 SQLite by default. Override with `DATABASE_URL` env var. In Docker, DB lives in the `db_data` named volume at `sqlite:////data/pdf_summarizer.db`.
 
 ### Key Env Vars
-| Variable | Where | Purpose |
-|---|---|---|
-| `OPENROUTER_API_KEY` | server | Required — passed to OpenAI-compatible client |
-| `DATABASE_URL` | server | SQLite path (default: `sqlite:///./pdf_summarizer.db`) |
-| `VITE_API_URL` | client build | Backend origin (default: `http://localhost:8000`) |
+| Variable | Where | Default | Purpose |
+|---|---|---|---|
+| `OPENROUTER_API_KEY` | server | — | Required |
+| `OPENROUTER_BASE_URL` | server | `https://openrouter.ai/api/v1` | API base URL |
+| `LLM_MODEL` | server | `openai/gpt-4o-mini` | Model used for Map and Reduce phases |
+| `DATABASE_URL` | server | `sqlite:///./pdf_summarizer.db` | SQLite path |
+| `VITE_API_URL` | client build | `http://localhost:8000` | Backend origin |
+| `VITE_POLL_INTERVAL_MS` | client build | `4000` | History polling interval (ms) |
+
+Vite reads `.env` from the **monorepo root** (configured via `envDir: '..'` in `vite.config.ts`).
