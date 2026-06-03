@@ -73,5 +73,6 @@ client/src/
 | `LLM_MODEL` | server | `openai/gpt-4o-mini` | Model used for Map and Reduce phases |
 | `DATABASE_URL` | server | `sqlite:///./pdf_summarizer.db` | SQLite path |
 | `VITE_API_URL` | client build | `http://localhost:8000` | Backend origin |
+| `HF_TOKEN` | server | — | Optional. Hugging Face token for higher rate limits and faster model downloads |
 
 Vite reads `.env` from the **monorepo root** (configured via `envDir: '..'` in `vite.config.ts`).

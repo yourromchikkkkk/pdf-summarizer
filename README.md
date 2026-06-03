@@ -60,6 +60,9 @@ Copy `.env.example` to `.env` in the **root directory** and fill in your key:
 OPENROUTER_API_KEY=your-openrouter-api-key-here
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1   # optional override
 LLM_MODEL=openai/gpt-4o-mini                       # any OpenRouter model slug
+DATABASE_URL=sqlite:///./pdf_summarizer.db         # optional override
+VITE_API_URL=http://localhost:8000                 # optional override
+HF_TOKEN=your-huggingface-token-here               # optional: enables higher rate limits and faster downloads for Docling models
 ```
 
 ### 2. Start the Application
