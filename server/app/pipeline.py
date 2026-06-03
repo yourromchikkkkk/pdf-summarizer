@@ -174,90 +174,147 @@ async def reduce_summaries(summaries: List[str]) -> str:
     return final_summary
 
 
+async def convert_pdf_to_markdown(document_id: str, file_path: str) -> str:
+    """
+    Parses the local PDF file using Docling converter and exports it to Markdown.
+    Emits progress stage 'parsing'.
+    """
+    await emit_progress(document_id, {"stage": "parsing"})
+    logger.info(f"Parsing PDF with Docling: {file_path}")
+    
+    pipeline_options = PdfPipelineOptions()
+    # Force CPU to avoid MPS float64 errors on Apple Silicon.
+    pipeline_options.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.CPU)
+    
+    converter = DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+    )
+    
+    # Run conversion inside a pool executor since it's CPU-bound
+    loop = asyncio.get_running_loop()
+    conversion_result = await loop.run_in_executor(None, converter.convert, file_path)
+    markdown_text = conversion_result.document.export_to_markdown()
+    
+    logger.info(f"PDF parsed successfully. Length of markdown: {len(markdown_text)} characters.")
+    
+    if not markdown_text.strip():
+        raise ValueError("Parsed markdown content is empty or could not be read.")
+        
+    return markdown_text
+
+
+async def process_chunks_map_phase(document_id: str, chunks: List[str]) -> List[str]:
+    """
+    Executes the concurrent Map Phase to summarize each chunk.
+    Maintains a thread-safe increment counter to emit progress linearly.
+    """
+    total_chunks = len(chunks)
+    semaphore = asyncio.Semaphore(3)
+    completed_count = 0
+    counter_lock = asyncio.Lock()
+
+    async def sem_summarize(chunk: str, idx: int) -> str:
+        nonlocal completed_count
+        async with semaphore:
+            result = await summarize_chunk(chunk, idx, total_chunks)
+        
+        async with counter_lock:
+            completed_count += 1
+            current_completed = completed_count
+
+        await emit_progress(
+            document_id, 
+            {
+                "stage": "summarizing", 
+                "chunk": current_completed, 
+                "total_chunks": total_chunks
+            }
+        )
+        return result
+
+    tasks = [sem_summarize(chunk, i) for i, chunk in enumerate(chunks)]
+    return await asyncio.gather(*tasks)
+
+
+async def update_document_success(db, document_id: str, final_summary: str):
+    """
+    Marks the document as successfully summarized in the database.
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if doc:
+        doc.status = "completed"
+        doc.summary = final_summary
+        db.commit()
+        await emit_progress(document_id, {"stage": "completed"})
+        logger.info(f"Updated document_id={document_id} status to COMPLETED.")
+    else:
+        logger.error(f"Document {document_id} not found in database on success update.")
+
+
+async def update_document_failure(db, document_id: str, error: Exception):
+    """
+    Rolls back database state and marks the document as failed.
+    """
+    db.rollback()
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if doc:
+        doc.status = "failed"
+        doc.summary = f"Error during parsing or summarization: {str(error)}"
+        db.commit()
+        await emit_progress(document_id, {"stage": "failed", "error": str(error)})
+        logger.info(f"Updated document_id={document_id} status to FAILED.")
+    else:
+        logger.error(f"Document {document_id} not found in database on failure update.")
+
+
+def delete_temporary_file(file_path: str):
+    """
+    Deletes the uploaded PDF file to avoid storage leakage.
+    """
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+            logger.info(f"Cleaned up temporary upload file: {file_path}")
+        except Exception as cleanup_err:
+            logger.error(f"Failed to remove file {file_path}: {cleanup_err}")
+
+
 async def run_pipeline(document_id: str, file_path: str):
     """
-    Executes the parsing, chunking, and Map-Reduce summarization pipeline.
-    Updates the database based on results.
-    Cleans up the source file in a finally block.
+    Orchestrates the entire PDF parsing, chunking, and Map-Reduce summarization pipeline.
     """
     logger.info(f"Pipeline started for document_id={document_id}, file_path={file_path}")
     
     db = SessionLocal()
     try:
         # 1. Parse PDF using Docling
-        await emit_progress(document_id, {"stage": "parsing"})
-        logger.info(f"Parsing PDF with Docling: {file_path}")
-        pipeline_options = PdfPipelineOptions()
-        # Force CPU to avoid MPS float64 errors on Apple Silicon.
-        pipeline_options.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.CPU)
-        converter = DocumentConverter(
-            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-        )
-        
-        # Use run_in_executor to avoid blocking the asyncio event loop since conversion is CPU-bound
-        loop = asyncio.get_running_loop()
-        conversion_result = await loop.run_in_executor(None, converter.convert, file_path)
-        markdown_text = conversion_result.document.export_to_markdown()
-        
-        logger.info(f"PDF parsed successfully. Length of markdown: {len(markdown_text)} characters.")
-        
-        if not markdown_text.strip():
-            raise ValueError("Parsed markdown content is empty or could not be read.")
+        markdown_text = await convert_pdf_to_markdown(document_id, file_path)
 
         # 2. Chunking
         chunks = chunk_markdown(markdown_text, max_chunk_size=10000)
         total_chunks = len(chunks)
-        await emit_progress(document_id, {"stage": "chunking", "total_chunks": total_chunks})
         logger.info(f"Split markdown into {total_chunks} chunks.")
 
-        # 3. Map Phase: Summarize each chunk
-        # To avoid exceeding OpenAI rate limits, we limit concurrency to 3 simultaneous calls
-        semaphore = asyncio.Semaphore(3)
-
-        async def sem_summarize(chunk: str, idx: int) -> str:
-            async with semaphore:
-                result = await summarize_chunk(chunk, idx, total_chunks)
-            await emit_progress(document_id, {"stage": "summarizing", "chunk": idx + 1, "total_chunks": total_chunks})
-            return result
-
-        tasks = [sem_summarize(chunk, i) for i, chunk in enumerate(chunks)]
-        chunk_summaries = await asyncio.gather(*tasks)
-
-        # 4. Reduce Phase: Consolidate summaries
-        await emit_progress(document_id, {"stage": "reducing"})
-        final_summary = await reduce_summaries(chunk_summaries)
-
-        # 5. State Machine Update: Success
-        doc = db.query(Document).filter(Document.id == document_id).first()
-        if doc:
-            doc.status = "completed"
-            doc.summary = final_summary
-            db.commit()
-            await emit_progress(document_id, {"stage": "completed"})
-            logger.info(f"Updated document_id={document_id} status to COMPLETED.")
+        if total_chunks == 1:
+            logger.info("Only one chunk detected. Skipping chunking summarization and moving directly to final synthesis.")
+            await emit_progress(document_id, {"stage": "reducing"})
+            final_summary = await reduce_summaries(chunks)
         else:
-            logger.error(f"Document {document_id} not found in database on success update.")
+            # 3. Map Phase: Summarize each chunk concurrently
+            await emit_progress(document_id, {"stage": "chunking", "total_chunks": total_chunks})
+            chunk_summaries = await process_chunks_map_phase(document_id, chunks)
+
+            # 4. Reduce Phase: Consolidate summaries
+            await emit_progress(document_id, {"stage": "reducing"})
+            final_summary = await reduce_summaries(chunk_summaries)
+
+        # 5. Database Status Update: Success
+        await update_document_success(db, document_id, final_summary)
 
     except Exception as e:
         logger.exception(f"Error in pipeline for document_id={document_id}: {e}")
-        db.rollback()
-        # State Machine Update: Failure
-        doc = db.query(Document).filter(Document.id == document_id).first()
-        if doc:
-            doc.status = "failed"
-            doc.summary = f"Error during parsing or summarization: {str(e)}"
-            db.commit()
-            await emit_progress(document_id, {"stage": "failed", "error": str(e)})
-            logger.info(f"Updated document_id={document_id} status to FAILED.")
-        else:
-            logger.error(f"Document {document_id} not found in database on failure update.")
+        await update_document_failure(db, document_id, e)
             
     finally:
         db.close()
-        # Clean up local PDF file
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Cleaned up temporary upload file: {file_path}")
-            except Exception as cleanup_err:
-                logger.error(f"Failed to remove file {file_path}: {cleanup_err}")
+        delete_temporary_file(file_path)
