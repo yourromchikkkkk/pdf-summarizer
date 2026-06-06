@@ -1,6 +1,26 @@
 version: '3.8'
 
 services:
+  minio:
+    image: minio/minio:latest
+    container_name: pdf_summarizer_minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   server:
     build:
       context: ./server
@@ -14,8 +34,15 @@ services:
       - LLM_MODEL=${LLM_MODEL:-openai/gpt-4o-mini}
       - DATABASE_URL=sqlite:////data/pdf_summarizer.db
       - HF_TOKEN=${HF_TOKEN}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-pdf-summarizer}
+      - MINIO_SECURE=false
     volumes:
       - db_data:/data
+    depends_on:
+      - minio
     restart: always
 
   client:
@@ -31,4 +58,6 @@ services:
 
 volumes:
   db_data:
+    driver: local
+  minio_data:
     driver: local
