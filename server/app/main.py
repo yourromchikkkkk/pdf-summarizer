@@ -18,6 +18,7 @@ from .database import get_db, engine, Base
 from .models import Document
 from .migrations import run_migrations
 from .pipeline import run_pipeline, register_progress_queue, unregister_progress_queue
+from .storage import get_presigned_url
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")

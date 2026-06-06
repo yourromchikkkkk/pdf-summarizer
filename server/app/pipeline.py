@@ -1,13 +1,14 @@
 import os
 import logging
 import asyncio
-from typing import List
+from typing import List, Optional
 from openai import AsyncOpenAI
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
 from .database import SessionLocal
 from .models import Document
+from .storage import upload_pdf
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -236,7 +237,7 @@ async def process_chunks_map_phase(document_id: str, chunks: List[str]) -> List[
     return await asyncio.gather(*tasks)
 
 
-async def update_document_success(db, document_id: str, final_summary: str):
+async def update_document_success(db, document_id: str, final_summary: str, storage_key: Optional[str] = None):
     """
     Marks the document as successfully summarized in the database.
     """
@@ -244,6 +245,8 @@ async def update_document_success(db, document_id: str, final_summary: str):
     if doc:
         doc.status = "completed"
         doc.summary = final_summary
+        if storage_key:
+            doc.storage_key = storage_key
         db.commit()
         await emit_progress(document_id, {"stage": "completed"})
         logger.info(f"Updated document_id={document_id} status to COMPLETED.")
@@ -279,12 +282,12 @@ def delete_temporary_file(file_path: str):
             logger.error(f"Failed to remove file {file_path}: {cleanup_err}")
 
 
-async def run_pipeline(document_id: str, file_path: str):
+async def run_pipeline(document_id: str, file_path: str, user_id: str, filename: str):
     """
     Orchestrates the entire PDF parsing, chunking, and Map-Reduce summarization pipeline.
     """
     logger.info(f"Pipeline started for document_id={document_id}, file_path={file_path}")
-    
+
     db = SessionLocal()
     try:
         # 1. Parse PDF using Docling
@@ -308,13 +311,23 @@ async def run_pipeline(document_id: str, file_path: str):
             await emit_progress(document_id, {"stage": "reducing"})
             final_summary = await reduce_summaries(chunk_summaries)
 
-        # 5. Database Status Update: Success
-        await update_document_success(db, document_id, final_summary)
+        # 5. Upload original PDF to MinIO for future analysis
+        storage_key: Optional[str] = None
+        loop = asyncio.get_running_loop()
+        try:
+            storage_key = await loop.run_in_executor(
+                None, upload_pdf, user_id, document_id, filename, file_path
+            )
+        except Exception as upload_err:
+            logger.warning(f"MinIO upload failed for document {document_id}: {upload_err}")
+
+        # 6. Database Status Update: Success
+        await update_document_success(db, document_id, final_summary, storage_key)
 
     except Exception as e:
         logger.exception(f"Error in pipeline for document_id={document_id}: {e}")
         await update_document_failure(db, document_id, e)
-            
+
     finally:
         db.close()
         delete_temporary_file(file_path)
