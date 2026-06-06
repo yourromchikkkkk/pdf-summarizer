@@ -16,12 +16,14 @@ from sqlalchemy.orm import Session
 
 from .database import get_db, engine, Base
 from .models import Document
+from .migrations import run_migrations
 from .pipeline import run_pipeline, register_progress_queue, unregister_progress_queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
 Base.metadata.create_all(bind=engine)
+run_migrations(engine)
 
 app = FastAPI(title="PDF Summarizer API", version="1.0.0")
 
@@ -73,7 +75,7 @@ async def upload_document(
         os.unlink(file_path)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error while saving document metadata")
 
-    background_tasks.add_task(run_pipeline, document_id, file_path)
+    background_tasks.add_task(run_pipeline, document_id, file_path, x_user_id, file.filename)
 
     return {"id": doc.id, "filename": doc.filename, "status": doc.status, "created_at": doc.created_at}
 
@@ -143,6 +145,21 @@ async def document_events(doc_id: str, db: Session = Depends(get_db)):
             unregister_progress_queue(doc_id)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=sse_headers)
+
+
+@app.get("/api/documents/{doc_id}/download")
+def download_document(doc_id: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not doc.storage_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not available in storage")
+    try:
+        url = get_presigned_url(doc.storage_key)
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for {doc_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Storage unavailable")
+    return {"url": url}
 
 
 @app.get("/health")

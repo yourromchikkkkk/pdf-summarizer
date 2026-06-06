@@ -14,4 +14,5 @@ class Document(Base):
     filename = Column(String(255), nullable=False)
     status = Column(String(50), default="processing", nullable=False) # 'processing', 'completed', 'failed'
     summary = Column(Text, nullable=True)
+    storage_key = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
