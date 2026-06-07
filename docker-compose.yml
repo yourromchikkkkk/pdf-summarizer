@@ -1,6 +1,21 @@
 version: '3.8'
 
 services:
+  mongo:
+    image: mongo:7
+    container_name: pdf_summarizer_mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: always
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   minio:
     image: minio/minio:latest
     container_name: pdf_summarizer_minio
@@ -39,10 +54,13 @@ services:
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - MINIO_BUCKET=${MINIO_BUCKET:-pdf-summarizer}
       - MINIO_SECURE=false
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB=${MONGO_DB:-pdf_summarizer}
     volumes:
       - db_data:/data
     depends_on:
       - minio
+      - mongo
     restart: always
 
   client:
@@ -60,4 +78,6 @@ volumes:
   db_data:
     driver: local
   minio_data:
+    driver: local
+  mongo_data:
     driver: local

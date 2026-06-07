@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+from datetime import datetime, timezone
 from typing import List, Optional
 from openai import AsyncOpenAI
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -9,6 +10,7 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOp
 from .database import SessionLocal
 from .models import Document
 from .storage import upload_pdf
+from .conversation_store import save_conversation
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -100,12 +102,13 @@ def chunk_markdown(text: str, max_chunk_size: int = 10000) -> List[str]:
     return [c.strip() for c in chunks if c.strip()]
 
 
-async def summarize_chunk(chunk: str, chunk_index: int, total_chunks: int) -> str:
+async def summarize_chunk(chunk: str, chunk_index: int, total_chunks: int) -> tuple[str, str]:
     """
     Map Phase: Call OpenAI to summarize an individual chunk.
+    Returns (summary, prompt) for data collection.
     """
     logger.info(f"Summarizing chunk {chunk_index + 1}/{total_chunks} (length={len(chunk)})...")
-    
+
     prompt = (
         "<task>\n"
         "Analyze the document section and produce a structured, bulleted summary covering:\n"
@@ -119,7 +122,6 @@ async def summarize_chunk(chunk: str, chunk_index: int, total_chunks: int) -> st
         "</document_section>"
     )
 
-    # Call OpenAI Async API
     client = get_openai_client()
     response = await client.chat.completions.create(
         model=MODEL,
@@ -129,15 +131,16 @@ async def summarize_chunk(chunk: str, chunk_index: int, total_chunks: int) -> st
         ],
         temperature=0.2
     )
-    
+
     summary = response.choices[0].message.content
     logger.info(f"Finished chunk {chunk_index + 1}/{total_chunks}.")
-    return summary
+    return summary, prompt
 
 
-async def reduce_summaries(summaries: List[str]) -> str:
+async def reduce_summaries(summaries: List[str]) -> tuple[str, str]:
     """
     Reduce Phase: Consolidate multiple chunk summaries into a final executive summary.
+    Returns (final_summary, prompt) for data collection.
     """
     logger.info(f"Starting Reduce phase for {len(summaries)} summaries...")
     combined_summaries = "\n\n".join(
@@ -169,10 +172,10 @@ async def reduce_summaries(summaries: List[str]) -> str:
         ],
         temperature=0.2
     )
-    
+
     final_summary = response.choices[0].message.content
     logger.info("Successfully completed Reduce phase.")
-    return final_summary
+    return final_summary, prompt
 
 
 async def convert_pdf_to_markdown(document_id: str, file_path: str) -> str:
@@ -204,37 +207,44 @@ async def convert_pdf_to_markdown(document_id: str, file_path: str) -> str:
     return markdown_text
 
 
-async def process_chunks_map_phase(document_id: str, chunks: List[str]) -> List[str]:
+async def process_chunks_map_phase(
+    document_id: str, chunks: List[str]
+) -> tuple[List[str], List[dict]]:
     """
     Executes the concurrent Map Phase to summarize each chunk.
-    Maintains a thread-safe increment counter to emit progress linearly.
+    Returns (summaries, chunk_records) where chunk_records contain text/prompt/summary
+    for data collection.
     """
     total_chunks = len(chunks)
     semaphore = asyncio.Semaphore(3)
     completed_count = 0
     counter_lock = asyncio.Lock()
 
-    async def sem_summarize(chunk: str, idx: int) -> str:
+    async def sem_summarize(chunk: str, idx: int) -> tuple[str, str, int]:
         nonlocal completed_count
         async with semaphore:
-            result = await summarize_chunk(chunk, idx, total_chunks)
-        
+            summary, prompt = await summarize_chunk(chunk, idx, total_chunks)
+
         async with counter_lock:
             completed_count += 1
             current_completed = completed_count
 
         await emit_progress(
-            document_id, 
-            {
-                "stage": "summarizing", 
-                "chunk": current_completed, 
-                "total_chunks": total_chunks
-            }
+            document_id,
+            {"stage": "summarizing", "chunk": current_completed, "total_chunks": total_chunks},
         )
-        return result
+        return summary, prompt, idx
 
-    tasks = [sem_summarize(chunk, i) for i, chunk in enumerate(chunks)]
-    return await asyncio.gather(*tasks)
+    results = await asyncio.gather(*[sem_summarize(chunk, i) for i, chunk in enumerate(chunks)])
+
+    summaries = [r[0] for r in results]
+    chunk_records = [
+        {"index": r[2], "text": chunks[r[2]]
+         
+         , "map_prompt": r[1], "summary": r[0]}
+        for r in results
+    ]
+    return summaries, chunk_records
 
 
 async def update_document_success(db, document_id: str, final_summary: str, storage_key: Optional[str] = None):
@@ -298,18 +308,19 @@ async def run_pipeline(document_id: str, file_path: str, user_id: str, filename:
         total_chunks = len(chunks)
         logger.info(f"Split markdown into {total_chunks} chunks.")
 
+        chunk_records: List[dict] = []
         if total_chunks == 1:
             logger.info("Only one chunk detected. Skipping chunking summarization and moving directly to final synthesis.")
             await emit_progress(document_id, {"stage": "reducing"})
-            final_summary = await reduce_summaries(chunks)
+            final_summary, reduce_prompt = await reduce_summaries(chunks)
         else:
             # 3. Map Phase: Summarize each chunk concurrently
             await emit_progress(document_id, {"stage": "chunking", "total_chunks": total_chunks})
-            chunk_summaries = await process_chunks_map_phase(document_id, chunks)
+            chunk_summaries, chunk_records = await process_chunks_map_phase(document_id, chunks)
 
             # 4. Reduce Phase: Consolidate summaries
             await emit_progress(document_id, {"stage": "reducing"})
-            final_summary = await reduce_summaries(chunk_summaries)
+            final_summary, reduce_prompt = await reduce_summaries(chunk_summaries)
 
         # 5. Upload original PDF to MinIO for future analysis
         storage_key: Optional[str] = None
@@ -323,6 +334,21 @@ async def run_pipeline(document_id: str, file_path: str, user_id: str, filename:
 
         # 6. Database Status Update: Success
         await update_document_success(db, document_id, final_summary, storage_key)
+
+        # 7. Save full conversation to MongoDB for data collection / evaluation
+        conversation = {
+            "_id": document_id,
+            "user_id": user_id,
+            "filename": filename,
+            "created_at": datetime.now(timezone.utc),
+            "model": MODEL,
+            "markdown_length": len(markdown_text),
+            "num_chunks": total_chunks,
+            "chunks": chunk_records,
+            "reduce_prompt": reduce_prompt,
+            "final_summary": final_summary,
+        }
+        await save_conversation(conversation)
 
     except Exception as e:
         logger.exception(f"Error in pipeline for document_id={document_id}: {e}")
