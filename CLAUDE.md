@@ -31,7 +31,7 @@ docker-compose up --build
 
 ## Architecture
 
-**Stack**: React + Vite + TanStack Query (client) / FastAPI + SQLite + MinIO (server) — orchestrated via Docker Compose.
+**Stack**: React + Vite + TanStack Query (client) / FastAPI + SQLite + MinIO + MongoDB (server) — orchestrated via Docker Compose.
 
 ### Request Flow
 1. Browser generates a UUID user ID stored in `localStorage`. Every request sends it as `X-User-ID` header.
@@ -42,6 +42,7 @@ docker-compose up --build
    - **Map phase**: `asyncio.Semaphore(3)` limits concurrent OpenRouter calls; each chunk gets a bullet-point summary via `openai/gpt-4o-mini`.
    - **Reduce phase**: all chunk summaries are joined and sent for a final structured executive summary.
    - The original PDF is uploaded to MinIO (`storage.py`) under `{user_id}/{document_id}/{filename}`; the resulting `storage_key` is saved to the DB. MinIO failure is non-fatal — pipeline still completes.
+   - The full conversation record (markdown, per-chunk prompts/summaries, reduce prompt, final summary) is upserted into MongoDB (`conversation_store.py`, collection `pdf_conversations`). MongoDB failure is non-fatal.
    - DB status is set to `"completed"` or `"failed"`; the temp file is deleted in `finally`.
 4. `GET /api/history` returns the last 5 documents for the user. The frontend polls via TanStack Query only while any document has `status === "processing"`.
 5. `GET /api/documents/{doc_id}/download` returns a 1-hour presigned MinIO URL for the original PDF (404 if not yet stored).
@@ -54,6 +55,17 @@ SQLite by default. Override with `DATABASE_URL` env var. In Docker, DB lives in 
 
 ### Object Storage (`storage.py`)
 MinIO stores original PDFs for future analysis. The bucket is auto-created on first upload. Objects are keyed as `{user_id}/{document_id}/{filename}`. In Docker, data lives in the `minio_data` named volume. The `storage_key` column on `documents` is set after a successful upload; it's null for documents processed before MinIO was added (or if MinIO is unreachable). Migrations are managed by `app/migrations.py`. SQL files live in `server/migrations/` and are discovered by filename in sorted order (e.g. `0001_add_storage_key.sql`). Applied migrations are tracked in a `_migrations` table so each runs exactly once. `main.py` calls `run_migrations(engine)` at startup. To run migrations standalone: `python -m app.migrations` from the `server/` directory. To add a new migration, drop a new numbered `.sql` file in `server/migrations/`.
+
+### Conversation Store (`conversation_store.py`)
+MongoDB stores the full pipeline conversation for data collection and future evaluation. After each successful pipeline run, an upsert is made to the `pdf_conversations` collection keyed by `document_id`. Each record contains:
+- `_id`: document UUID
+- `user_id`, `filename`, `created_at`, `model`
+- `markdown_length`, `num_chunks`
+- `chunks`: array of `{index, text, map_prompt, summary}` — the raw chunk, the exact prompt sent, and the LLM response
+- `reduce_prompt`: the prompt used for the final synthesis
+- `final_summary`: the executive summary text
+
+MongoDB connection is configured via `MONGO_URI` / `MONGO_DB` env vars. The client is lazy and failures are non-fatal (logged as warnings). In Docker, data lives in the `mongo_data` named volume.
 
 ### Frontend structure
 ```
@@ -87,5 +99,7 @@ client/src/
 | `MINIO_SECURE` | server | `false` | Set `true` to use TLS |
 | `MINIO_ROOT_USER` | minio | `minioadmin` | Root user for the MinIO container |
 | `MINIO_ROOT_PASSWORD` | minio | `minioadmin` | Root password for the MinIO container |
+| `MONGO_URI` | server | `mongodb://localhost:27017` | MongoDB connection URI (use `mongodb://mongo:27017` in Docker) |
+| `MONGO_DB` | server | `pdf_summarizer` | MongoDB database name |
 
 Vite reads `.env` from the **monorepo root** (configured via `envDir: '..'` in `vite.config.ts`).

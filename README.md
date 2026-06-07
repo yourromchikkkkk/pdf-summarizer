@@ -1,6 +1,6 @@
 # Docling PDF Summarizer Monorepo
 
-A production-grade monorepo web application that allows users to upload large PDF files (up to 50MB, ~100 pages), parses them into structured markdown using IBM's Docling document parsing engine, and generates executive-level summaries via OpenRouter's API using an asynchronous Map-Reduce pipeline.
+A production-grade monorepo web application that allows users to upload large PDF files (up to 50MB, ~100 pages), parses them into structured markdown using IBM's Docling document parsing engine, and generates executive-level summaries via OpenRouter's API using an asynchronous Map-Reduce pipeline. Every pipeline run is persisted to MongoDB for data collection and evaluation.
 
 ## Project Topology
 
@@ -20,10 +20,12 @@ A production-grade monorepo web application that allows users to upload large PD
 │
 ├── server/                 # Python + FastAPI Backend
 │   ├── app/
-│   │   ├── main.py         # FastAPI routes, CORS, SSE endpoint, DB initialization
-│   │   ├── database.py     # SQLite engine and SQLAlchemy session setup
-│   │   ├── models.py       # DB schema for 'documents' table
-│   │   └── pipeline.py     # Docling parser + Map-Reduce pipeline + SSE progress queues
+│   │   ├── main.py               # FastAPI routes, CORS, SSE endpoint, DB initialization
+│   │   ├── database.py           # SQLite engine and SQLAlchemy session setup
+│   │   ├── models.py             # DB schema for 'documents' table
+│   │   ├── pipeline.py           # Docling parser + Map-Reduce pipeline + SSE progress queues
+│   │   ├── mongo.py              # MongoDB async client (Motor)
+│   │   └── conversation_store.py # Saves full pipeline conversations to MongoDB
 │   ├── Dockerfile          # Server Dockerfile (CPU PyTorch + Pre-cached models)
 │   └── requirements.txt    # Python dependencies
 │
@@ -42,9 +44,10 @@ A production-grade monorepo web application that allows users to upload large PD
    - **Map Phase**: Splits Markdown text into chunks of ~10,000 characters and processes them concurrently (up to 3 parallel requests using an `asyncio.Semaphore`) to avoid rate limits.
    - **Reduce Phase**: Synthesizes chunk summaries into a highly structured, non-redundant Executive Summary. Model is configurable via `LLM_MODEL` env var (default: `openai/gpt-4o-mini` via OpenRouter).
 3. **Database State Machine**: Tracks files through `processing`, `completed`, and `failed` phases with automatic DB transaction commits and rollback safety.
-4. **Real-Time Progress via Server-Sent Events**: The pipeline emits granular progress events (`parsing → chunking → summarizing chunk N/M → reducing → completed`) over `GET /api/documents/{id}/events`. The frontend opens a native `EventSource` after upload and updates the status banner in real time — no polling during active processing.
-5. **Vite + Tailwind CSS v4 Client**: Sleek dark mode design with glassmorphism dropzone cards, interactive Toast states (`sonner`), copy-to-clipboard actions, and markdown-formatted report export.
-5. **Docker Optimization**:
+4. **Conversation Logging to MongoDB**: After each successful pipeline run, the full conversation record is upserted into the `pdf_conversations` MongoDB collection — capturing the extracted markdown, every chunk's raw text + LLM prompt + response, the reduce prompt, and the final summary. Designed for evaluation pipelines: replay any document through a new model/prompt and diff the outputs. MongoDB failure is non-fatal.
+5. **Real-Time Progress via Server-Sent Events**: The pipeline emits granular progress events (`parsing → chunking → summarizing chunk N/M → reducing → completed`) over `GET /api/documents/{id}/events`. The frontend opens a native `EventSource` after upload and updates the status banner in real time — no polling during active processing.
+6. **Vite + Tailwind CSS v4 Client**: Sleek dark mode design with glassmorphism dropzone cards, interactive Toast states (`sonner`), copy-to-clipboard actions, and markdown-formatted report export.
+7. **Docker Optimization**:
    - Uses CPU-only PyTorch, reducing image size by ~2GB.
    - Pre-downloads Docling AI model weights at Docker image build-time to ensure runs are fast and do not require external Hugging Face downloads at runtime.
 
@@ -63,6 +66,8 @@ LLM_MODEL=openai/gpt-4o-mini                       # any OpenRouter model slug
 DATABASE_URL=sqlite:///./pdf_summarizer.db         # optional override
 VITE_API_URL=http://localhost:8000                 # optional override
 HF_TOKEN=your-huggingface-token-here               # optional: enables higher rate limits and faster downloads for Docling models
+MONGO_URI=mongodb://localhost:27017                # optional: defaults to localhost; use mongodb://mongo:27017 in Docker
+MONGO_DB=pdf_summarizer                            # optional: MongoDB database name
 ```
 
 ### 2. Start the Application
@@ -75,7 +80,9 @@ docker-compose up --build
 
 - **Client SPA**: Access at [http://localhost:5173](http://localhost:5173)
 - **FastAPI Documentation**: Access at [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Persistent Data**: SQLite database is persisted in the `db_data` Docker volume. Uploaded PDFs are written to OS temp files and deleted immediately after processing.
+- **MinIO API / Console**: `http://localhost:9000` / `http://localhost:9001`
+- **MongoDB**: `mongodb://localhost:27017` — database `pdf_summarizer`, collection `pdf_conversations`
+- **Persistent Data**: SQLite in `db_data` volume, PDFs in `minio_data` volume, conversation logs in `mongo_data` volume.
 
 ---
 
