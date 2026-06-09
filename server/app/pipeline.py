@@ -11,6 +11,7 @@ from .database import SessionLocal
 from .models import Document
 from .storage import upload_pdf
 from .conversation_store import save_conversation
+from .vector_store import index_document
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -322,7 +323,14 @@ async def run_pipeline(document_id: str, file_path: str, user_id: str, filename:
             await emit_progress(document_id, {"stage": "reducing"})
             final_summary, reduce_prompt = await reduce_summaries(chunk_summaries)
 
-        # 5. Upload original PDF to MinIO for future analysis
+        # 5. Index chunks into ChromaDB for RAG chat
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, index_document, document_id, chunks)
+        except Exception as idx_err:
+            logger.warning(f"ChromaDB indexing failed for document {document_id}: {idx_err}")
+
+        # 6. Upload original PDF to MinIO for future analysis
         storage_key: Optional[str] = None
         loop = asyncio.get_running_loop()
         try:
@@ -332,10 +340,10 @@ async def run_pipeline(document_id: str, file_path: str, user_id: str, filename:
         except Exception as upload_err:
             logger.warning(f"MinIO upload failed for document {document_id}: {upload_err}")
 
-        # 6. Database Status Update: Success
+        # 7. Database Status Update: Success
         await update_document_success(db, document_id, final_summary, storage_key)
 
-        # 7. Save full conversation to MongoDB for data collection / evaluation
+        # 8. Save full conversation to MongoDB for data collection / evaluation
         conversation = {
             "_id": document_id,
             "user_id": user_id,
